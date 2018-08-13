@@ -12,8 +12,8 @@ import (
 	"os"
 	"sync"
 
-	"github.com/mightyguava/ecsdeploy/deployer"
 	"github.com/fatih/color"
+	"github.com/mightyguava/ecsdeploy/deployer"
 	"github.com/sfreiberg/progress"
 )
 
@@ -49,7 +49,7 @@ func (r *TerminalReporter) printDeployStatus(status *deployer.DeployStatus) int 
 	fmt.Fprintf(r.w, "current:  %v/%v running, %v pending\n", status.Current.Running, status.Current.Desired, status.Current.Pending)
 	// If there were running tasks at the start of the deployment, always report the number of tasks stopped.
 	if status.Previous.Total > 0 {
-		lines += 1
+		lines++
 		fmt.Fprintf(r.w, "previous: %v/%v stopped\n", status.Previous.Total-status.Previous.Running, status.Previous.Total)
 	}
 	for i := 0; i < r.dots; i++ {
@@ -148,7 +148,12 @@ func (r *SlackReporter) sendReport(s *deployer.DeployStatus) error {
 		r.prg.Opts.ShowEstTime = false
 	}
 	r.prg.Opts.Task = fmt.Sprintf(`deploy %v to %v`, s.Service, s.Cluster)
-	percent := (s.Current.Running + s.Current.Pending/2 + (s.Previous.Total - s.Previous.Running)) * 100 / (s.Current.Desired + s.Previous.Total)
+	var percent int
+	if s.Current.Desired+s.Previous.Total == 0 {
+		percent = 100
+	} else {
+		percent = (s.Current.Running + s.Current.Pending/2 + (s.Previous.Total - s.Previous.Running)) * 100 / (s.Current.Desired + s.Previous.Total)
+	}
 	if percent == 0 {
 		percent = 1
 	}
@@ -189,7 +194,7 @@ func NewDiscardingSender() *ThrottlingExecutor {
 	}
 }
 
-// Report sends the deployment status via HTTP to the given address. This function returns immediately, and sends the
+// DoOrDiscard sends the deployment status via HTTP to the given address. This function returns immediately, and sends the
 // HTTP requests in the background. If the HTTP endpoint responds slower than Report is called, only the latest deploy
 // status is sent.
 func (r *ThrottlingExecutor) DoOrDiscard(fn func() error) {
