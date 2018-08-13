@@ -7,13 +7,14 @@ import (
 	"strings"
 	"time"
 
+	"errors"
+
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/ecs"
 	"github.com/fatih/color"
 	"github.com/mightyguava/ecsdeploy/deployer"
 	"github.com/mightyguava/ecsdeploy/reporter"
 	"gopkg.in/alecthomas/kingpin.v3-unstable"
-	"errors"
 )
 
 type CLI struct {
@@ -39,8 +40,8 @@ func main() {
 
 func run() error {
 	cli := &CLI{}
-	kingpin.Arg("cluster", "Cluster to deploy to").StringVar(&cli.Cluster)
-	kingpin.Arg("service", "Name of service to deploy").StringVar(&cli.Service)
+	kingpin.Arg("cluster", "Cluster to deploy to").Required().StringVar(&cli.Cluster)
+	kingpin.Arg("service", "Name of service to deploy").Required().StringVar(&cli.Service)
 	kingpin.Flag("timeout", "How long to wait for the deploy to complete").Default("10m").DurationVar(&cli.Timeout)
 	kingpin.Flag("report-addr", "URL address to report deploy status changes to").StringVar(&cli.ReportAddr)
 	kingpin.Flag("report-auth-token", "Auth token to use for reporting deploy status via HTTP. Appears on the HTTP request as an \"Authorization: Bearer <...>\" header").StringVar(&cli.ReportAuthToken)
