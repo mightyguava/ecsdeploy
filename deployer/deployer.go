@@ -48,6 +48,9 @@ type Request struct {
 	Cluster        string
 	Service        string
 	TaskDefinition io.Reader
+	DesiredCount   int64
+	MaxPercent     int64
+	MinPercent     int64
 }
 
 func NewDeployer(svc *ecs.ECS, reporter Reporter) *Deployer {
@@ -59,13 +62,13 @@ func NewDeployer(svc *ecs.ECS, reporter Reporter) *Deployer {
 
 func (d *Deployer) Deploy(ctx context.Context, r *Request) error {
 	if r.TaskDefinition != nil {
-		return d.deployTaskDefinitionFile(ctx, r.Cluster, r.Service, r.TaskDefinition)
+		return d.deployTaskDefinitionFile(ctx, r, r.TaskDefinition)
 	}
-	return d.deployCurrentTaskDefinition(ctx, r.Cluster, r.Service)
+	return d.deployCurrentTaskDefinition(ctx, r)
 }
 
-func (d *Deployer) deployCurrentTaskDefinition(ctx context.Context, clusterName, serviceName string) error {
-	svc, err := d.getService(ctx, clusterName, serviceName)
+func (d *Deployer) deployCurrentTaskDefinition(ctx context.Context, r *Request) error {
+	svc, err := d.getService(ctx, r.Cluster, r.Service)
 	if err != nil {
 		return err
 	}
@@ -75,19 +78,19 @@ func (d *Deployer) deployCurrentTaskDefinition(ctx context.Context, clusterName,
 	color.White("Deploying based on %v:%v", *tdNew.Family, *tdNew.Revision)
 	fmt.Println()
 
-	return d.deployTaskDefinition(ctx, clusterName, serviceName, tdNew)
+	return d.deployTaskDefinition(ctx, r, tdNew)
 }
 
-func (d *Deployer) deployTaskDefinitionFile(ctx context.Context, clusterName, serviceName string, taskReader io.Reader) error {
+func (d *Deployer) deployTaskDefinitionFile(ctx context.Context, r *Request, taskReader io.Reader) error {
 	tdNew := &ecs.TaskDefinition{}
 	if err := json.NewDecoder(taskReader).Decode(tdNew); err != nil {
 		return fmt.Errorf("error reading task definition: %v", err)
 	}
 
-	return d.deployTaskDefinition(ctx, clusterName, serviceName, tdNew)
+	return d.deployTaskDefinition(ctx, r, tdNew)
 }
 
-func (d *Deployer) deployTaskDefinition(ctx context.Context, clusterName, serviceName string, tdNew *ecs.TaskDefinition) error {
+func (d *Deployer) deployTaskDefinition(ctx context.Context, r *Request, tdNew *ecs.TaskDefinition) error {
 	var err error
 
 	color.White("Creating new task definition revision")
@@ -98,7 +101,7 @@ func (d *Deployer) deployTaskDefinition(ctx context.Context, clusterName, servic
 	fmt.Println()
 
 	color.White("Updating service")
-	if err := d.updateService(ctx, clusterName, serviceName, *tdNew.TaskDefinitionArn); err != nil {
+	if err := d.updateService(ctx, r, *tdNew.TaskDefinitionArn); err != nil {
 		return err
 	}
 	color.Green("Successfully changed task definition to: %v:%v", *tdNew.Family, *tdNew.Revision)
@@ -106,7 +109,7 @@ func (d *Deployer) deployTaskDefinition(ctx context.Context, clusterName, servic
 
 	color.White("Deploying new task definition")
 	fmt.Println()
-	if err := d.waitForFinish(ctx, clusterName, serviceName); err != nil {
+	if err := d.waitForFinish(ctx, r.Cluster, r.Service); err != nil {
 		return err
 	}
 	color.Green("Deployment completed")
@@ -155,12 +158,22 @@ func (d *Deployer) registerTaskDefinition(ctx context.Context, td *ecs.TaskDefin
 	return o.TaskDefinition, nil
 }
 
-func (d *Deployer) updateService(ctx context.Context, cluster, service, taskDefinition string) error {
-	_, err := d.ecsz.UpdateServiceWithContext(ctx, &ecs.UpdateServiceInput{
-		Cluster:        &cluster,
-		Service:        &service,
+func (d *Deployer) updateService(ctx context.Context, r *Request, taskDefinition string) error {
+	input := &ecs.UpdateServiceInput{
+		Cluster:        &r.Cluster,
+		Service:        &r.Service,
 		TaskDefinition: &taskDefinition,
-	})
+	}
+	if r.DesiredCount != -1 {
+		input.DesiredCount = &r.DesiredCount
+	}
+	if r.MinPercent != -1 && r.MaxPercent != -1 {
+		input.DeploymentConfiguration = &ecs.DeploymentConfiguration{
+			MinimumHealthyPercent: &r.MinPercent,
+			MaximumPercent: &r.MaxPercent,
+		}
+	}
+	_, err := d.ecsz.UpdateServiceWithContext(ctx, input)
 	return err
 }
 

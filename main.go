@@ -13,6 +13,7 @@ import (
 	"github.com/mightyguava/ecsdeploy/deployer"
 	"github.com/mightyguava/ecsdeploy/reporter"
 	"gopkg.in/alecthomas/kingpin.v3-unstable"
+	"errors"
 )
 
 type CLI struct {
@@ -24,6 +25,9 @@ type CLI struct {
 	TaskDefinition  string
 	SlackToken      string
 	SlackChannel    string
+	DesiredCount    int64
+	MinPercent      int64
+	MaxPercent      int64
 }
 
 func main() {
@@ -43,10 +47,21 @@ func run() error {
 	kingpin.Flag("slack-token", "Auth token to use for reporting deploy status to Slack").StringVar(&cli.SlackToken)
 	kingpin.Flag("slack-channel", "Slack channel to post deploy status to").StringVar(&cli.SlackChannel)
 	kingpin.Flag("task-definition", "Location of a task definition file to deploy. If not specified, creates a new task definition based off the currently deployed one. If \"-\" is specified, reads stdin.").StringVar(&cli.TaskDefinition)
+	kingpin.Flag("desired-count", "Desired number of tasks").Default("-1").Int64Var(&cli.DesiredCount)
+	kingpin.Flag("max-percent", "The upper limit (as a percentage of the service's desiredCount) of the number of tasks that are allowed in the RUNNING or PENDING state in a service during a deployment.").Default("-1").Int64Var(&cli.MaxPercent)
+	kingpin.Flag("min-percent", "The lower limit (as a percentage of the service's desiredCount) of the number of running tasks that must remain in the RUNNING state in a service during.").Default("-1").Int64Var(&cli.MinPercent)
+
 	kingpin.Parse()
+
+	if (cli.MinPercent != -1 || cli.MaxPercent != -1) && (cli.MinPercent == -1 || cli.MaxPercent == -1) {
+		return errors.New("max-percent and min-healthy-percent must both be set or unset")
+	}
+
 	ctx, cancel := context.WithTimeout(context.Background(), cli.Timeout)
 	defer cancel()
-	sess, err := session.NewSession()
+	sess, err := session.NewSessionWithOptions(session.Options{
+		SharedConfigState: session.SharedConfigEnable,
+	})
 	if err != nil {
 		return err
 	}
@@ -64,8 +79,11 @@ func run() error {
 	}
 	d := deployer.NewDeployer(ecsz, rep)
 	req := &deployer.Request{
-		Cluster: cli.Cluster,
-		Service: cli.Service,
+		Cluster:      cli.Cluster,
+		Service:      cli.Service,
+		DesiredCount: cli.DesiredCount,
+		MaxPercent:   cli.MaxPercent,
+		MinPercent:   cli.MinPercent,
 	}
 	if cli.TaskDefinition != "" {
 		if cli.TaskDefinition == "-" {
