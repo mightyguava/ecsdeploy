@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
@@ -48,6 +49,7 @@ type Request struct {
 	Cluster        string
 	Service        string
 	TaskDefinition io.Reader
+	Tags           []string
 	DesiredCount   int64
 	MaxPercent     int64
 	MinPercent     int64
@@ -93,6 +95,12 @@ func (d *Deployer) deployTaskDefinitionFile(ctx context.Context, r *Request, tas
 func (d *Deployer) deployTaskDefinition(ctx context.Context, r *Request, tdNew *ecs.TaskDefinition) error {
 	var err error
 
+	if len(r.Tags) > 0 {
+		if err = OverrideImages(tdNew, r); err != nil {
+			return err
+		}
+	}
+
 	color.White("Creating new task definition revision")
 	if tdNew, err = d.registerTaskDefinition(ctx, tdNew); err != nil {
 		return err
@@ -114,6 +122,59 @@ func (d *Deployer) deployTaskDefinition(ctx context.Context, r *Request, tdNew *
 	}
 	color.Green("Deployment completed")
 	return nil
+}
+
+func OverrideImages(td *ecs.TaskDefinition, r *Request) error {
+	color.White("Override images")
+	type tagspec struct {
+		container string
+		tag       string
+	}
+	var specs []tagspec
+	for _, tag := range r.Tags {
+		if pieces := strings.Split(tag, "="); len(pieces) == 1 {
+			specs = append(specs, tagspec{tag: tag})
+		} else if len(pieces) == 2 {
+			specs = append(specs, tagspec{container: pieces[0], tag: pieces[1]})
+		} else {
+			return fmt.Errorf("invalid tag %s", tag)
+		}
+	}
+	if len(specs) == 1 && specs[0].container == "" {
+		if len(td.ContainerDefinitions) > 1 {
+			return errors.New("no container specified, but there are multiple container definitions")
+		} else if len(td.ContainerDefinitions) == 1 {
+			specs[0].container = *td.ContainerDefinitions[0].Name
+		}
+	}
+	if len(specs) >= 1 {
+		for _, spec := range specs {
+			found := false
+			if spec.container == "" {
+				return fmt.Errorf("tag %v missing container name", spec.tag)
+			}
+			for _, cd := range td.ContainerDefinitions {
+				if *cd.Name == spec.container {
+					found = true
+					cd.SetImage(UpdateImageTag(*cd.Image, spec.tag))
+					color.Green("Updated container %q to %q", *cd.Name, *cd.Image)
+				}
+			}
+			if !found {
+				return fmt.Errorf("did not found matching container for tag %s=%s", spec.container, spec.tag)
+			}
+		}
+	}
+	fmt.Println()
+	return nil
+}
+
+func UpdateImageTag(image, tag string) string {
+	pieces := strings.SplitN(image, ":", 2)
+	if len(pieces) == 1 {
+		return image + ":" + tag
+	}
+	return pieces[0] + ":" + tag
 }
 
 func (d *Deployer) getService(ctx context.Context, clusterName, serviceName string) (*ecs.Service, error) {
@@ -170,7 +231,7 @@ func (d *Deployer) updateService(ctx context.Context, r *Request, taskDefinition
 	if r.MinPercent != -1 && r.MaxPercent != -1 {
 		input.DeploymentConfiguration = &ecs.DeploymentConfiguration{
 			MinimumHealthyPercent: &r.MinPercent,
-			MaximumPercent: &r.MaxPercent,
+			MaximumPercent:        &r.MaxPercent,
 		}
 	}
 	_, err := d.ecsz.UpdateServiceWithContext(ctx, input)
