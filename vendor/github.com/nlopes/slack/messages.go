@@ -69,7 +69,7 @@ type Msg struct {
 	ParentUserId string  `json:"parent_user_id,omitempty"`
 
 	// file_share, file_comment, file_mention
-	Files []File `json:"files,omitempty"`
+	File *File `json:"file,omitempty"`
 
 	// file_share
 	Upload bool `json:"upload,omitempty"`
@@ -89,8 +89,8 @@ type Msg struct {
 
 	// slash commands and interactive messages
 	ResponseType    string `json:"response_type,omitempty"`
-	ReplaceOriginal bool   `json:"replace_original"`
-	DeleteOriginal  bool   `json:"delete_original"`
+	ReplaceOriginal bool   `json:"replace_original,omitempty"`
+	DeleteOriginal  bool   `json:"delete_original,omitempty"`
 }
 
 // Icon is used for bot messages
