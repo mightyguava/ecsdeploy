@@ -30,6 +30,7 @@ type CLI struct {
 	MinPercent      int64
 	MaxPercent      int64
 	Tags            []string
+	DetectFailures  bool
 }
 
 func main() {
@@ -53,6 +54,7 @@ func run() error {
 	kingpin.Flag("max-percent", "The upper limit (as a percentage of the service's desiredCount) of the number of tasks that are allowed in the RUNNING or PENDING state in a service during a deployment.").Default("-1").Int64Var(&cli.MaxPercent)
 	kingpin.Flag("min-percent", "The lower limit (as a percentage of the service's desiredCount) of the number of running tasks that must remain in the RUNNING state in a service during.").Default("-1").Int64Var(&cli.MinPercent)
 	kingpin.Flag("tag", "Overrides the docker image tag for a container definition, written as --tag <container_name>=<image_tag>. If there is only one container definition, the <container_name>= prefix can be omitted. This flag can be specified multiple times to update tags for multiple containers").StringsVar(&cli.Tags)
+	kingpin.Flag("detect-failures", "Enable to detect deploy failures early. Failures can include: cluster not having enough cpu/memory, image to deploy does not exist, or service is in crash loop.").Default("true").BoolVar(&cli.DetectFailures)
 
 	kingpin.Parse()
 
@@ -82,12 +84,13 @@ func run() error {
 	}
 	d := deployer.NewDeployer(ecsz, rep)
 	req := &deployer.Request{
-		Cluster:      cli.Cluster,
-		Service:      cli.Service,
-		Tags:         cli.Tags,
-		DesiredCount: cli.DesiredCount,
-		MaxPercent:   cli.MaxPercent,
-		MinPercent:   cli.MinPercent,
+		Cluster:        cli.Cluster,
+		Service:        cli.Service,
+		Tags:           cli.Tags,
+		DesiredCount:   cli.DesiredCount,
+		MaxPercent:     cli.MaxPercent,
+		MinPercent:     cli.MinPercent,
+		DetectFailures: cli.DetectFailures,
 	}
 	if cli.TaskDefinition != "" {
 		if cli.TaskDefinition == "-" {

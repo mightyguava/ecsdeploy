@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"strings"
 	"time"
 
@@ -53,6 +54,9 @@ type Request struct {
 	DesiredCount   int64
 	MaxPercent     int64
 	MinPercent     int64
+	DetectFailures bool
+
+	newTaskDefinition *ecs.TaskDefinition
 }
 
 func NewDeployer(svc *ecs.ECS, reporter Reporter) *Deployer {
@@ -112,12 +116,13 @@ func (d *Deployer) deployTaskDefinition(ctx context.Context, r *Request, tdNew *
 	if err := d.updateService(ctx, r, *tdNew.TaskDefinitionArn); err != nil {
 		return err
 	}
+	r.newTaskDefinition = tdNew
 	color.Green("Successfully changed task definition to: %v:%v", *tdNew.Family, *tdNew.Revision)
 	fmt.Println()
 
 	color.White("Deploying new task definition")
 	fmt.Println()
-	if err := d.waitForFinish(ctx, r.Cluster, r.Service); err != nil {
+	if err := d.waitForFinish(ctx, r); err != nil {
 		return err
 	}
 	color.Green("Deployment completed")
@@ -238,7 +243,12 @@ func (d *Deployer) updateService(ctx context.Context, r *Request, taskDefinition
 	return err
 }
 
-func (d *Deployer) waitForFinish(ctx context.Context, cluster string, service string) error {
+func (d *Deployer) waitForFinish(ctx context.Context, r *Request) error {
+	cluster, service := r.Cluster, r.Service
+	// Wait 10 seconds from deploy start before beginning to detect failures, so that we can ignore issues resulting
+	// from the last deploy.
+	detectStart := time.Now().Add(10 * time.Second)
+
 	prevTotal := 0
 	for {
 		svc, err := d.getService(ctx, cluster, service)
@@ -246,6 +256,11 @@ func (d *Deployer) waitForFinish(ctx context.Context, cluster string, service st
 			return err
 		}
 		done := isDone(svc.Deployments)
+		if r.DetectFailures && detectStart.Before(time.Now()) {
+			if err := d.detectFailures(ctx, r, detectStart, svc); err != nil {
+				return err
+			}
+		}
 
 		current := svc.Deployments[0]
 		previous := svc.Deployments[1:]
@@ -288,6 +303,67 @@ func (d *Deployer) waitForFinish(ctx context.Context, cluster string, service st
 		}
 	}
 	return nil
+}
+
+func (d *Deployer) detectFailures(ctx context.Context, r *Request, detectStart time.Time, svc *ecs.Service) error {
+	// Detect failures reported by the ECS agent as service messages.
+	var errorEvents []string
+	for _, evt := range svc.Events {
+		if evt.CreatedAt.After(detectStart) &&
+			(strings.Contains(*evt.Message, "unable") || strings.Contains(*evt.Message, "unhealthy")) {
+			errorEvents = append(errorEvents, *evt.Message)
+		}
+	}
+	// If there are at least 2 error events, assume that we are failing.
+	if len(errorEvents) > 1 {
+		return errors.New("errors detected during deploy. Failing fast since the deploy is unlikely to succeed:\n" + strings.Join(indent(errorEvents), "\n"))
+	}
+
+	// Detect failures due to tasks being deployed exiting frequently.
+	taskArns, err := d.ecsz.ListTasks(&ecs.ListTasksInput{
+		Cluster:       &r.Cluster,
+		ServiceName:   &r.Service,
+		DesiredStatus: aws.String(ecs.DesiredStatusStopped),
+	})
+	if err != nil {
+		log.Println("error listing tasks: ", err)
+		return nil
+	}
+	tasks, err := d.ecsz.DescribeTasks(&ecs.DescribeTasksInput{
+		Cluster: &r.Cluster,
+		Tasks:   taskArns.TaskArns,
+	})
+	if err != nil {
+		log.Println("error describing tasks: ", err)
+		return nil
+	}
+	deployTaskArn := *r.newTaskDefinition.TaskDefinitionArn
+	var (
+		stoppedTask  *ecs.Task
+		stoppedCount int
+	)
+	for _, task := range tasks.Tasks {
+		if *task.TaskDefinitionArn == deployTaskArn {
+			stoppedTask = task
+			stoppedCount++
+		}
+	}
+	if stoppedCount > 1 {
+		errs := []string{"error: tasks stopped too many times: " + aws.StringValue(stoppedTask.StoppedReason)}
+		for _, container := range stoppedTask.Containers {
+			errs = append(errs, fmt.Sprintf("  %s exited %v: %s", *container.Name, aws.Int64Value(container.ExitCode), aws.StringValue(container.Reason)))
+		}
+		return errors.New(strings.Join(errs, "\n"))
+	}
+	return nil
+}
+
+func indent(txt []string) []string {
+	var out []string
+	for _, l := range txt {
+		out = append(out, "  "+l)
+	}
+	return out
 }
 
 func isDone(deps []*ecs.Deployment) bool {
