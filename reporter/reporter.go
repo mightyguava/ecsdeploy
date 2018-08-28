@@ -58,10 +58,16 @@ func (r *TerminalReporter) printDeployStatus(status *deployer.DeployStatus) int 
 	return lines
 }
 
+const (
+	seqEraseLine = "\033[K"
+	seqUpOneLine = "\033[1A]"
+)
+
 func (r *TerminalReporter) eraseLast(n int) {
 	for i := 0; i < n; i++ {
-		fmt.Fprint(r.w, "\033[1A")
-		fmt.Fprint(r.w, "\033[2K\r")
+		fmt.Print(seqUpOneLine)
+		fmt.Print(seqEraseLine)
+		fmt.Print("\r")
 	}
 }
 

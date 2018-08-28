@@ -329,6 +329,9 @@ func (d *Deployer) detectFailures(ctx context.Context, r *Request, detectStart t
 		log.Println("error listing tasks: ", err)
 		return nil
 	}
+	if len(taskArns.TaskArns) == 0 {
+		return nil
+	}
 	tasks, err := d.ecsz.DescribeTasks(&ecs.DescribeTasksInput{
 		Cluster: &r.Cluster,
 		Tasks:   taskArns.TaskArns,
