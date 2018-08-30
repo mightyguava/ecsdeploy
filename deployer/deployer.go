@@ -170,7 +170,10 @@ func (d *Deployer) deployInner(ctx context.Context, r *Request, tdNew *ecs.TaskD
 
 func (d *Deployer) print(r *Request, t MessageType, msg string, args ...interface{}) {
 	if r.status == nil {
-		r.status = &DeployStatus{}
+		r.status = &DeployStatus{
+			Cluster: r.Cluster,
+			Service: r.Service,
+		}
 	}
 	status := *r.status
 	status.Stage = r.stage
