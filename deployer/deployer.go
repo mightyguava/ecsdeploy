@@ -130,7 +130,7 @@ func (d *Deployer) deployTaskDefinition(ctx context.Context, r *Request, tdNew *
 			}
 		}
 		d.print(r, Error, err.Error())
-		return errors.New("Deployment failed")
+		return err
 	}
 
 	d.print(r, Success, "Deployment completed")

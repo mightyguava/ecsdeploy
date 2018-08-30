@@ -96,8 +96,8 @@ func run() error {
 		if cli.TaskDefinition == "-" {
 			req.TaskDefinition = os.Stdin
 		} else {
-			f, err := os.Open(cli.TaskDefinition)
-			if err != nil {
+			f, erri := os.Open(cli.TaskDefinition)
+			if erri != nil {
 				return fmt.Errorf("error opening task definition file: %v", err)
 			}
 			req.TaskDefinition = f
@@ -105,10 +105,9 @@ func run() error {
 		}
 	}
 	if err = d.Deploy(ctx, req); err != nil {
-		if strings.Contains(err.Error(), "deadline exceeded") {
-			err = fmt.Errorf("deploy timed out after %v", cli.Timeout)
-		}
-		return err
+		// The actual error message is relayed via the reporters, so no need to print the error contents
+		// here.
+		return errors.New("deploy failed")
 	}
 	if err = rep.Wait(ctx); err != nil {
 		if strings.Contains(err.Error(), "deadline exceeded") {
