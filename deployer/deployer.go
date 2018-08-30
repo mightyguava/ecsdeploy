@@ -6,23 +6,45 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"strings"
 	"time"
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awsutil"
 	"github.com/aws/aws-sdk-go/service/ecs"
-	"github.com/fatih/color"
 )
 
 type DeployStatus struct {
+	Stage          Stage    `json:"stage,omitempty"`
+	Message        *Message `json:"message,omitempty"`
 	Current        Current  `json:"current,omitempty"`
 	Previous       Previous `json:"previous,omitempty"`
 	Done           bool     `json:"done"`
 	Service        string   `json:"service,omitempty"`
 	Cluster        string   `json:"cluster,omitempty"`
 	TaskDefinition string   `json:"task_definition,omitempty"`
+}
+
+type MessageType string
+
+const (
+	Info    = "info"
+	Success = "warning"
+	Error   = "error"
+)
+
+type Stage int
+
+const (
+	StageCreateTaskDefinition Stage = iota
+	StageUpdateService
+	StageWaitForDeploy
+	StageCompleted
+)
+
+type Message struct {
+	Type MessageType `json:"type,omitempty"`
+	Text string      `json:"text,omitempty"`
 }
 
 type Current struct {
@@ -57,6 +79,8 @@ type Request struct {
 	DetectFailures bool
 
 	newTaskDefinition *ecs.TaskDefinition
+	stage             Stage
+	status            *DeployStatus
 }
 
 func NewDeployer(svc *ecs.ECS, reporter Reporter) *Deployer {
@@ -67,6 +91,7 @@ func NewDeployer(svc *ecs.ECS, reporter Reporter) *Deployer {
 }
 
 func (d *Deployer) Deploy(ctx context.Context, r *Request) error {
+	r.stage = StageCreateTaskDefinition
 	if r.TaskDefinition != nil {
 		return d.deployTaskDefinitionFile(ctx, r, r.TaskDefinition)
 	}
@@ -81,8 +106,7 @@ func (d *Deployer) deployCurrentTaskDefinition(ctx context.Context, r *Request) 
 	td, err := d.getTaskDefinition(ctx, *svc.TaskDefinition)
 	tdNew := &ecs.TaskDefinition{}
 	awsutil.Copy(tdNew, td)
-	color.White("Deploying based on %v:%v", *tdNew.Family, *tdNew.Revision)
-	fmt.Println()
+	d.print(r, Info, "Deploying based on %v:%v", *tdNew.Family, *tdNew.Revision)
 
 	return d.deployTaskDefinition(ctx, r, tdNew)
 }
@@ -97,40 +121,75 @@ func (d *Deployer) deployTaskDefinitionFile(ctx context.Context, r *Request, tas
 }
 
 func (d *Deployer) deployTaskDefinition(ctx context.Context, r *Request, tdNew *ecs.TaskDefinition) error {
+	err := d.deployInner(ctx, r, tdNew)
+	r.stage = StageCompleted
+	if err != nil {
+		if strings.Contains(err.Error(), "deadline exceeded") {
+			if deadline, ok := ctx.Deadline(); ok && time.Now().After(deadline) {
+				err = errors.New("deploy timed out")
+			}
+		}
+		d.print(r, Error, err.Error())
+		return errors.New("Deployment failed")
+	}
+
+	d.print(r, Success, "Deployment completed")
+	return nil
+}
+
+func (d *Deployer) deployInner(ctx context.Context, r *Request, tdNew *ecs.TaskDefinition) error {
 	var err error
 
 	if len(r.Tags) > 0 {
-		if err = OverrideImages(tdNew, r); err != nil {
+		if err = d.OverrideImages(tdNew, r); err != nil {
 			return err
 		}
 	}
 
-	color.White("Creating new task definition revision")
+	d.print(r, Info, "Creating new task definition revision")
 	if tdNew, err = d.registerTaskDefinition(ctx, tdNew); err != nil {
 		return err
 	}
-	color.Green("Created task definition with revision %v", *tdNew.Revision)
-	fmt.Println()
+	d.print(r, Success, "Created task definition with revision %v", *tdNew.Revision)
 
-	color.White("Updating service")
+	r.stage = StageUpdateService
+	d.print(r, Info, "Updating service")
 	if err := d.updateService(ctx, r, *tdNew.TaskDefinitionArn); err != nil {
 		return err
 	}
 	r.newTaskDefinition = tdNew
-	color.Green("Successfully changed task definition to: %v:%v", *tdNew.Family, *tdNew.Revision)
-	fmt.Println()
+	d.print(r, Success, "Successfully changed task definition to: %v:%v", *tdNew.Family, *tdNew.Revision)
 
-	color.White("Deploying new task definition")
-	fmt.Println()
+	r.stage = StageWaitForDeploy
+	d.print(r, Info, "Deploying new task definition")
 	if err := d.waitForFinish(ctx, r); err != nil {
 		return err
 	}
-	color.Green("Deployment completed")
 	return nil
 }
 
-func OverrideImages(td *ecs.TaskDefinition, r *Request) error {
-	color.White("Override images")
+func (d *Deployer) print(r *Request, t MessageType, msg string, args ...interface{}) {
+	if r.status == nil {
+		r.status = &DeployStatus{}
+	}
+	status := *r.status
+	status.Stage = r.stage
+	status.Message = &Message{
+		Type: t,
+		Text: fmt.Sprintf(msg, args...),
+	}
+	d.reporter.Report(&status)
+}
+
+func (d *Deployer) report(r *Request, s *DeployStatus) {
+	r.status = s
+	status := *r.status
+	status.Stage = r.stage
+	d.reporter.Report(&status)
+}
+
+func (d *Deployer) OverrideImages(td *ecs.TaskDefinition, r *Request) error {
+	d.print(r, Info, "Override images")
 	type tagspec struct {
 		container string
 		tag       string
@@ -162,7 +221,7 @@ func OverrideImages(td *ecs.TaskDefinition, r *Request) error {
 				if *cd.Name == spec.container {
 					found = true
 					cd.SetImage(UpdateImageTag(*cd.Image, spec.tag))
-					color.Green("Updated container %q to %q", *cd.Name, *cd.Image)
+					d.print(r, Success, "Updated container %q to %q", *cd.Name, *cd.Image)
 				}
 			}
 			if !found {
@@ -170,7 +229,6 @@ func OverrideImages(td *ecs.TaskDefinition, r *Request) error {
 			}
 		}
 	}
-	fmt.Println()
 	return nil
 }
 
@@ -255,7 +313,6 @@ func (d *Deployer) waitForFinish(ctx context.Context, r *Request) error {
 		if err != nil {
 			return err
 		}
-		done := isDone(svc.Deployments)
 		if r.DetectFailures && detectStart.Before(time.Now()) {
 			if err := d.detectFailures(ctx, r, detectStart, svc); err != nil {
 				return err
@@ -275,6 +332,7 @@ func (d *Deployer) waitForFinish(ctx context.Context, r *Request) error {
 		for _, p := range previous {
 			prevRunning += int(*p.RunningCount)
 		}
+		done := isDone(svc.Deployments)
 		status := &DeployStatus{
 			Current: Current{
 				Desired: int(*current.DesiredCount),
@@ -290,7 +348,7 @@ func (d *Deployer) waitForFinish(ctx context.Context, r *Request) error {
 			Service:        service,
 			TaskDefinition: *current.TaskDefinition,
 		}
-		d.reporter.Report(status)
+		d.report(r, status)
 
 		if done {
 			break
@@ -326,7 +384,7 @@ func (d *Deployer) detectFailures(ctx context.Context, r *Request, detectStart t
 		DesiredStatus: aws.String(ecs.DesiredStatusStopped),
 	})
 	if err != nil {
-		log.Println("error listing tasks: ", err)
+		d.print(r, Error, "error listing tasks: %v", err)
 		return nil
 	}
 	if len(taskArns.TaskArns) == 0 {
@@ -337,7 +395,7 @@ func (d *Deployer) detectFailures(ctx context.Context, r *Request, detectStart t
 		Tasks:   taskArns.TaskArns,
 	})
 	if err != nil {
-		log.Println("error describing tasks: ", err)
+		d.print(r, Error, "error describing tasks: %v", err)
 		return nil
 	}
 	deployTaskArn := *r.newTaskDefinition.TaskDefinitionArn

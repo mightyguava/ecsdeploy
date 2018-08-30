@@ -26,17 +26,52 @@ type TerminalReporter struct {
 	dots               int
 	w                  io.Writer
 	numLastReportLines int
+	lastStage          deployer.Stage
 }
 
 func (r *TerminalReporter) Report(status *deployer.DeployStatus) {
 	if r.w == nil {
 		r.w = os.Stdout
 	}
-	r.eraseLast(r.numLastReportLines)
-	r.numLastReportLines = r.printDeployStatus(status)
-	r.dots++
+
+	if r.lastStage == deployer.StageWaitForDeploy {
+		r.eraseLast(r.numLastReportLines)
+		if status.Stage == deployer.StageWaitForDeploy {
+			r.printMsg(status.Message)
+		}
+		r.numLastReportLines = r.printDeployStatus(status)
+		r.dots++
+		if status.Stage == deployer.StageCompleted {
+			fmt.Println()
+		}
+	}
+
+	if status.Stage != r.lastStage {
+		fmt.Println()
+	}
+
+	if status.Stage != deployer.StageWaitForDeploy {
+		r.printMsg(status.Message)
+	}
+
+	r.lastStage = status.Stage
+
 	if status.Done {
 		fmt.Fprintln(r.w)
+	}
+}
+
+func (r *TerminalReporter) printMsg(m *deployer.Message) {
+	if m != nil {
+		text := m.Text
+		switch m.Type {
+		case deployer.Info:
+			color.White(text)
+		case deployer.Success:
+			color.Green(text)
+		case deployer.Error:
+			color.Red(text)
+		}
 	}
 }
 
@@ -60,7 +95,7 @@ func (r *TerminalReporter) printDeployStatus(status *deployer.DeployStatus) int 
 
 const (
 	seqEraseLine = "\033[K"
-	seqUpOneLine = "\033[1A]"
+	seqUpOneLine = "\033[1A"
 )
 
 func (r *TerminalReporter) eraseLast(n int) {

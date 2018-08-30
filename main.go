@@ -106,7 +106,7 @@ func run() error {
 	}
 	if err = d.Deploy(ctx, req); err != nil {
 		if strings.Contains(err.Error(), "deadline exceeded") {
-			return fmt.Errorf("deploy timed out after %v", cli.Timeout)
+			err = fmt.Errorf("deploy timed out after %v", cli.Timeout)
 		}
 		return err
 	}
