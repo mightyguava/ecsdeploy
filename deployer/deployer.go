@@ -163,7 +163,7 @@ func (d *Deployer) deployInner(ctx context.Context, r *Request, tdNew *ecs.TaskD
 	d.print(r, Success, "Successfully changed task definition to: %v:%v", *tdNew.Family, *tdNew.Revision)
 
 	r.stage = StageWaitForDeploy
-	d.print(r, Info, "Deploying new task definition")
+	d.print(r, Info, "Waiting for new task definition to be applied")
 	if err := d.waitForFinish(ctx, r); err != nil {
 		return err
 	}

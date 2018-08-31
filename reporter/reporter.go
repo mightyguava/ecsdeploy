@@ -188,6 +188,9 @@ func (r *SlackReporter) sendReport(s *deployer.DeployStatus) error {
 		r.prg = progress.New(r.token, r.channel, nil)
 		r.prg.Opts.ShowEstTime = false
 	}
+	if s.Message != nil {
+		return nil
+	}
 	r.prg.Opts.Task = fmt.Sprintf(`deploy %v to %v`, s.Service, s.Cluster)
 	var percent int
 	if s.Current.Desired+s.Previous.Total == 0 {
