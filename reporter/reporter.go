@@ -208,7 +208,13 @@ type CompositeReporter []reporter
 
 func (cr CompositeReporter) Report(status *deployer.DeployStatus) {
 	for _, r := range cr {
-		r.Report(status)
+		// Make a deep copy of the status for each reporter
+		s := *status
+		if status.Message != nil {
+			msg := *status.Message
+			s.Message = &msg
+		}
+		r.Report(&s)
 	}
 }
 
