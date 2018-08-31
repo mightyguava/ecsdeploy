@@ -41,7 +41,7 @@ func (r *TerminalReporter) Report(status *deployer.DeployStatus) {
 		}
 		r.numLastReportLines = r.printDeployStatus(status)
 		r.dots++
-		if status.Stage == deployer.StageCompleted {
+		if status.Stage >= deployer.StageCompleted {
 			fmt.Println()
 		}
 	}

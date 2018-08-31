@@ -40,6 +40,7 @@ const (
 	StageUpdateService
 	StageWaitForDeploy
 	StageCompleted
+	StageFailed
 )
 
 type Message struct {
@@ -122,8 +123,8 @@ func (d *Deployer) deployTaskDefinitionFile(ctx context.Context, r *Request, tas
 
 func (d *Deployer) deployTaskDefinition(ctx context.Context, r *Request, tdNew *ecs.TaskDefinition) error {
 	err := d.deployInner(ctx, r, tdNew)
-	r.stage = StageCompleted
 	if err != nil {
+		r.stage = StageFailed
 		if strings.Contains(err.Error(), "deadline exceeded") {
 			if deadline, ok := ctx.Deadline(); ok && time.Now().After(deadline) {
 				err = errors.New("deploy timed out")
@@ -133,6 +134,7 @@ func (d *Deployer) deployTaskDefinition(ctx context.Context, r *Request, tdNew *
 		return err
 	}
 
+	r.stage = StageCompleted
 	d.print(r, Success, "Deployment completed")
 	return nil
 }
