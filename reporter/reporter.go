@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"sync"
+	"time"
 
 	"github.com/fatih/color"
 	"github.com/mightyguava/ecsdeploy/deployer"
@@ -109,7 +110,7 @@ func (r *TerminalReporter) eraseLast(n int) {
 type HTTPReporter struct {
 	addr   string
 	token  string
-	sender *ThrottlingExecutor
+	sender *BufferedExecutor
 }
 
 func NewHTTPReporter(address, token string) (*HTTPReporter, error) {
@@ -119,12 +120,12 @@ func NewHTTPReporter(address, token string) (*HTTPReporter, error) {
 	return &HTTPReporter{
 		addr:   address,
 		token:  token,
-		sender: NewDiscardingSender(),
+		sender: NewBufferedExecutor(),
 	}, nil
 }
 
 func (r *HTTPReporter) Report(status *deployer.DeployStatus) {
-	r.sender.DoOrDiscard(func() error {
+	r.sender.Submit(func() error {
 		return r.sendReport(status)
 	})
 }
@@ -159,7 +160,7 @@ func (r *HTTPReporter) sendReport(status *deployer.DeployStatus) error {
 }
 
 type SlackReporter struct {
-	sender  *ThrottlingExecutor
+	sender  *BufferedExecutor
 	token   string
 	channel string
 	prg     *progress.Progress
@@ -167,14 +168,14 @@ type SlackReporter struct {
 
 func NewSlackReporter(token, channel string) *SlackReporter {
 	return &SlackReporter{
-		sender:  NewDiscardingSender(),
+		sender:  NewBufferedExecutor(),
 		token:   token,
 		channel: channel,
 	}
 }
 
 func (r *SlackReporter) Report(status *deployer.DeployStatus) {
-	r.sender.DoOrDiscard(func() error {
+	r.sender.Submit(func() error {
 		return r.sendReport(status)
 	})
 }
@@ -227,80 +228,90 @@ func (cr CompositeReporter) Wait(ctx context.Context) error {
 	return nil
 }
 
-type ThrottlingExecutor struct {
+type BufferedExecutor struct {
 	done chan bool
 
 	mu            *sync.Mutex
-	fn            func() error
-	dirty         bool
-	reporting     bool
+	buffer        []func() error
+	wg            sync.WaitGroup
 	waitingToStop bool
+	running       bool
 }
 
-func NewDiscardingSender() *ThrottlingExecutor {
-	return &ThrottlingExecutor{
+func NewBufferedExecutor() *BufferedExecutor {
+	return &BufferedExecutor{
 		done: make(chan bool),
 		mu:   &sync.Mutex{},
 	}
 }
 
-// DoOrDiscard sends the deployment status via HTTP to the given address. This function returns immediately, and sends the
+// Submit sends the deployment status via HTTP to the given address. This function returns immediately, and sends the
 // HTTP requests in the background. If the HTTP endpoint responds slower than Report is called, only the latest deploy
 // status is sent.
-func (r *ThrottlingExecutor) DoOrDiscard(fn func() error) {
+func (r *BufferedExecutor) Submit(fn func() error) {
 	r.mu.Lock()
-	r.fn, r.dirty = fn, true
+	r.buffer = append(r.buffer, fn)
 	r.mu.Unlock()
 	go r.doReport()
 }
 
-func (r *ThrottlingExecutor) Wait(ctx context.Context) error {
+func (r *BufferedExecutor) Wait(ctx context.Context) error {
 	r.mu.Lock()
 	r.waitingToStop = true
-	if !r.dirty && !r.reporting {
-		// Already done reporting, short circuit!
-		r.mu.Unlock()
-		return nil
-	}
 	r.mu.Unlock()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-r.done:
-		return nil
+	// idle wait for buffer to empty
+	for {
+		r.mu.Lock()
+		if len(r.buffer) == 0 {
+			return nil
+		}
+		r.mu.Unlock()
+		select {
+		case <-time.After(100 * time.Millisecond):
+			// continue
+		case <-ctx.Done():
+			// clear the buffer to stop the report loop
+			r.mu.Lock()
+			r.buffer = nil
+			r.mu.Unlock()
+			return ctx.Err()
+		}
 	}
 }
 
-func (r *ThrottlingExecutor) doReport() {
+func (r *BufferedExecutor) doReport() {
+	// Start doReportLoop if it's not already running
 	r.mu.Lock()
-	// If another report routine is already running, or if there's nothing to report, just return
-	if r.reporting || !r.dirty {
+	if r.running {
 		r.mu.Unlock()
 		return
 	}
-	// Claim that this routine is reporting so that no one else does, and clear the dirty bit
-	r.reporting = true
-	r.dirty = false
-	fn := r.fn
+	r.running = true
 	r.mu.Unlock()
 
-	err := fn()
-	if err != nil {
-		color.Red(err.Error())
-
-		r.mu.Lock()
-		r.dirty = true // Try again
-		r.mu.Unlock()
-	}
+	r.doReportLoop()
 
 	r.mu.Lock()
-	r.reporting = false
-	if r.dirty {
-		// There's new information to report! Report again
-		go r.doReport()
-	} else if r.waitingToStop {
-		// No new information to report, and we are waiting to stop, so stop
-		close(r.done)
-	}
+	r.running = false
 	r.mu.Unlock()
+}
+
+func (r *BufferedExecutor) doReportLoop() {
+	for {
+		r.mu.Lock()
+		if len(r.buffer) == 0 {
+			r.mu.Unlock()
+			return
+		}
+		fn := r.buffer[0]
+		r.mu.Unlock()
+		if err := fn(); err != nil {
+			r.mu.Unlock()
+			time.Sleep(100 * time.Millisecond)
+			continue
+		}
+		r.mu.Lock()
+		r.buffer = r.buffer[1:]
+		r.mu.Unlock()
+	}
 }
