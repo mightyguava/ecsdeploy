@@ -18,19 +18,21 @@ import (
 )
 
 type CLI struct {
-	Cluster         string
-	Service         string
-	Timeout         time.Duration
-	ReportAddr      string
-	ReportAuthToken string
-	TaskDefinition  string
-	SlackToken      string
-	SlackChannel    string
-	DesiredCount    int64
-	MinPercent      int64
-	MaxPercent      int64
-	Tags            []string
-	DetectFailures  bool
+	Cluster          string
+	Service          string
+	Timeout          time.Duration
+	ReportAddr       string
+	ReportAuthToken  string
+	TaskDefinition   string
+	SlackToken       string
+	SlackChannel     string
+	DesiredCount     int64
+	MinPercent       int64
+	MaxPercent       int64
+	Tags             []string
+	DetectFailures   bool
+	GrafanaURL       string
+	GrafanaAuthToken string
 }
 
 func main() {
@@ -49,6 +51,8 @@ func run() error {
 	kingpin.Flag("report-auth-token", "Auth token to use for reporting deploy status via HTTP. Appears on the HTTP request as an \"Authorization: Bearer <...>\" header").StringVar(&cli.ReportAuthToken)
 	kingpin.Flag("slack-token", "Auth token to use for reporting deploy status to Slack").StringVar(&cli.SlackToken)
 	kingpin.Flag("slack-channel", "Slack channel to post deploy status to").StringVar(&cli.SlackChannel)
+	kingpin.Flag("grafana-url", "URL to a Grafana server to send annotations to").StringVar(&cli.GrafanaURL)
+	kingpin.Flag("grafana-api-token", "API token for the Grafana server").StringVar(&cli.GrafanaAuthToken)
 	kingpin.Flag("task-definition", "Location of a task definition file to deploy. If not specified, creates a new task definition based off the currently deployed one. If \"-\" is specified, reads stdin.").StringVar(&cli.TaskDefinition)
 	kingpin.Flag("desired-count", "Desired number of tasks").Default("-1").Int64Var(&cli.DesiredCount)
 	kingpin.Flag("max-percent", "The upper limit (as a percentage of the service's desiredCount) of the number of tasks that are allowed in the RUNNING or PENDING state in a service during a deployment.").Default("-1").Int64Var(&cli.MaxPercent)
@@ -81,6 +85,9 @@ func run() error {
 	}
 	if cli.SlackToken != "" {
 		rep = reporter.CompositeReporter{rep, reporter.NewSlackReporter(cli.SlackToken, cli.SlackChannel)}
+	}
+	if cli.GrafanaURL != "" {
+		rep = reporter.CompositeReporter{rep, reporter.NewGrafanaReporter(cli.GrafanaURL, cli.GrafanaAuthToken)}
 	}
 	d := deployer.NewDeployer(ecsz, rep)
 	req := &deployer.Request{

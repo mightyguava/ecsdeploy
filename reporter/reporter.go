@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -306,6 +307,7 @@ func (r *BufferedExecutor) doReportLoop() {
 		fn := r.buffer[0]
 		r.mu.Unlock()
 		if err := fn(); err != nil {
+			log.Println(err.Error())
 			r.mu.Unlock()
 			time.Sleep(100 * time.Millisecond)
 			continue
@@ -314,4 +316,78 @@ func (r *BufferedExecutor) doReportLoop() {
 		r.buffer = r.buffer[1:]
 		r.mu.Unlock()
 	}
+}
+
+type GrafanaReporter struct {
+	sender     *BufferedExecutor
+	grafanaURL string
+	authToken  string
+	startTime  int64
+}
+
+func NewGrafanaReporter(grafanaURL, authToken string) *GrafanaReporter {
+	return &GrafanaReporter{
+		sender:     NewBufferedExecutor(),
+		grafanaURL: grafanaURL,
+		authToken:  authToken,
+	}
+}
+
+func (r *GrafanaReporter) Report(status *deployer.DeployStatus) {
+	if r.startTime == 0 {
+		r.startTime = time.Now().Unix() * 1000
+	}
+	if (status.Stage == deployer.StageCompleted || status.Stage == deployer.StageFailed) && r.startTime != 0 {
+		r.sender.Submit(func() error {
+			return r.sendReport(status)
+		})
+	}
+}
+
+func (r GrafanaReporter) sendReport(status *deployer.DeployStatus) error {
+	annotation := &GrafanaCreateAnnotationRequest{
+		IsRegion: true,
+		Time:     r.startTime,
+		TimeEnd:  time.Now().Unix() * 1000,
+		Tags: []string{
+			"deployment",
+			"cluster-" + status.Cluster,
+			"service-" + status.Service,
+		},
+		Text: fmt.Sprintf("deploy %s to %s with task definition %s", status.Service, status.Cluster, status.TaskDefinition),
+	}
+	body, err := json.Marshal(annotation)
+	if err != nil {
+		return fmt.Errorf("error marshaling grafana annotation request: %v", err)
+	}
+	req, err := http.NewRequest("POST", r.grafanaURL+"/api/annotations", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("error creating grafana annotation request: %v", err)
+	}
+	req.Header.Add("Authorization", "Bearer "+r.authToken)
+	req.Header.Add("Content-Type", "application/json; utf-8")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("error making grafana annotation request: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		rbody, _ := ioutil.ReadAll(resp.Body)
+		resp.Body.Close()
+		return fmt.Errorf("error making grafana annotation request, code [%v], error: %v", resp.StatusCode, string(rbody))
+	}
+	return nil
+}
+
+func (r GrafanaReporter) Wait(ctx context.Context) error {
+	return r.sender.Wait(ctx)
+}
+
+type GrafanaCreateAnnotationRequest struct {
+	DashboardID int64    `json:"dashboardId,omitempty"`
+	IsRegion    bool     `json:"isRegion,omitempty"`
+	PanelID     int64    `json:"panelId,omitempty"`
+	Tags        []string `json:"tags,omitempty"`
+	Text        string   `json:"text,omitempty"`
+	Time        int64    `json:"time,omitempty"`
+	TimeEnd     int64    `json:"timeEnd,omitempty"`
 }
