@@ -1,6 +1,17 @@
 # ecsdeploy
 
-A tool for deploying to ECS that supports reporting status to Slack and HTTP endpoints.
+There are already a few deploy tools for ECS out there, but none offer deploy progress reporting for
+chatops or dashboards. `ecsdeploy` is built as an easily deployable binary that can be fit into any
+deployment pipeline, but can also be used a library to embed directly into your team's deploy tool.
+
+`ecsdeploy` can report deploy progress
+- As a progress bar to Slack
+- As number of running/pending/stopped tasks as a webhook
+- As an annotation to Grafana
+
+Deploy status reporters to additional targets are easy to add by implementing a simple interface.
+
+Not only that, it also has "smart" monitoring of deploys, and can determine deploy failures due to resource constraints and task failures early.
 
 ```
 usage: ecsdeploy [<flags>] <cluster> <service>
