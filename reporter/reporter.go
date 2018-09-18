@@ -308,7 +308,6 @@ func (r *BufferedExecutor) doReportLoop() {
 		r.mu.Unlock()
 		if err := fn(); err != nil {
 			log.Println(err.Error())
-			r.mu.Unlock()
 			time.Sleep(100 * time.Millisecond)
 			continue
 		}
