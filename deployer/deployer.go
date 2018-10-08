@@ -11,6 +11,7 @@ import (
 
 	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/awsutil"
+	"github.com/aws/aws-sdk-go/service/cloudwatchevents"
 	"github.com/aws/aws-sdk-go/service/ecs"
 )
 
@@ -67,58 +68,94 @@ type Reporter interface {
 type Deployer struct {
 	ecsz     *ecs.ECS
 	reporter Reporter
+	cw       *cloudwatchevents.CloudWatchEvents
 }
 
 type Request struct {
-	Cluster        string
-	Service        string
-	TaskDefinition io.Reader
-	Tags           []string
-	DesiredCount   int64
-	MaxPercent     int64
-	MinPercent     int64
-	DetectFailures bool
+	Cluster            string
+	Service            string
+	TaskDefinition     io.Reader
+	Tags               []string
+	DesiredCount       int64
+	MaxPercent         int64
+	MinPercent         int64
+	DetectFailures     bool
+	ScheduleExpression string
+	IsScheduledTask    bool
+	ScheduleTargetID   string
 
-	newTaskDefinition *ecs.TaskDefinition
-	stage             Stage
-	status            *DeployStatus
+	newTaskDefinition    *ecs.TaskDefinition
+	currentScheduledTask *ScheduledTask
+	stage                Stage
+	status               *DeployStatus
 }
 
-func NewDeployer(svc *ecs.ECS, reporter Reporter) *Deployer {
+type ScheduledTask struct {
+	rule   *cloudwatchevents.DescribeRuleOutput
+	target *cloudwatchevents.Target
+}
+
+func NewDeployer(svc *ecs.ECS, cw *cloudwatchevents.CloudWatchEvents, reporter Reporter) *Deployer {
 	return &Deployer{
 		ecsz:     svc,
+		cw:       cw,
 		reporter: reporter,
 	}
 }
 
 func (d *Deployer) Deploy(ctx context.Context, r *Request) error {
 	r.stage = StageCreateTaskDefinition
+	var (
+		tdNew *ecs.TaskDefinition
+		err   error
+	)
 	if r.TaskDefinition != nil {
-		return d.deployTaskDefinitionFile(ctx, r, r.TaskDefinition)
+		tdNew, err = d.readTaskDefinitionFile(ctx, r, r.TaskDefinition)
+	} else {
+		tdNew, err = d.getCurrentTaskDefinition(ctx, r)
+		if err == nil {
+			d.print(r, Info, "Deploying based on %v:%v", *tdNew.Family, *tdNew.Revision)
+		}
 	}
-	return d.deployCurrentTaskDefinition(ctx, r)
-}
-
-func (d *Deployer) deployCurrentTaskDefinition(ctx context.Context, r *Request) error {
-	svc, err := d.getService(ctx, r.Cluster, r.Service)
 	if err != nil {
+		r.stage = StageFailed
+		d.print(r, Error, "Error getting task definition: %v", err.Error())
 		return err
 	}
-	td, err := d.getTaskDefinition(ctx, *svc.TaskDefinition)
-	tdNew := &ecs.TaskDefinition{}
-	awsutil.Copy(tdNew, td)
-	d.print(r, Info, "Deploying based on %v:%v", *tdNew.Family, *tdNew.Revision)
-
 	return d.deployTaskDefinition(ctx, r, tdNew)
 }
 
-func (d *Deployer) deployTaskDefinitionFile(ctx context.Context, r *Request, taskReader io.Reader) error {
+func (d *Deployer) getCurrentTaskDefinition(ctx context.Context, r *Request) (*ecs.TaskDefinition, error) {
+	var taskDefinition string
+	if r.IsScheduledTask {
+		task, err := d.getScheduledTask(ctx, r)
+		if err != nil {
+			return nil, err
+		}
+		taskDefinition = *task.target.EcsParameters.TaskDefinitionArn
+	} else {
+		svc, err := d.getService(ctx, r.Cluster, r.Service)
+		if err != nil {
+			return nil, err
+		}
+		taskDefinition = *svc.TaskDefinition
+	}
+	td, err := d.getTaskDefinition(ctx, taskDefinition)
+	if err != nil {
+		return nil, err
+	}
+	tdNew := &ecs.TaskDefinition{}
+	awsutil.Copy(tdNew, td)
+	return tdNew, nil
+}
+
+func (d *Deployer) readTaskDefinitionFile(ctx context.Context, r *Request, taskReader io.Reader) (*ecs.TaskDefinition, error) {
 	tdNew := &ecs.TaskDefinition{}
 	if err := json.NewDecoder(taskReader).Decode(tdNew); err != nil {
-		return fmt.Errorf("error reading task definition: %v", err)
+		return nil, fmt.Errorf("error reading task definition: %v", err)
 	}
 
-	return d.deployTaskDefinition(ctx, r, tdNew)
+	return tdNew, nil
 }
 
 func (d *Deployer) deployTaskDefinition(ctx context.Context, r *Request, tdNew *ecs.TaskDefinition) error {
@@ -154,18 +191,32 @@ func (d *Deployer) deployInner(ctx context.Context, r *Request, tdNew *ecs.TaskD
 	}
 	d.print(r, Success, "Created task definition with revision %v", *tdNew.Revision)
 
-	r.stage = StageUpdateService
-	d.print(r, Info, "Updating service")
-	if err := d.updateService(ctx, r, *tdNew.TaskDefinitionArn); err != nil {
-		return err
-	}
-	r.newTaskDefinition = tdNew
-	d.print(r, Success, "Successfully changed task definition to: %v:%v", *tdNew.Family, *tdNew.Revision)
+	if r.IsScheduledTask {
+		d.print(r, Info, "Updating cloudwatch rule and target")
+		if err := d.updateScheduledTaskTarget(ctx, r, *tdNew.TaskDefinitionArn); err != nil {
+			return err
+		}
+		d.print(r, Success, "Successfully changed task definition to: %v:%v", *tdNew.Family, *tdNew.Revision)
+		if r.ScheduleExpression != "" {
+			if err := d.updateScheduleExpression(ctx, r); err != nil {
+				return err
+			}
+			d.print(r, Success, "Successfully changed schedule to: %v", r.ScheduleExpression)
+		}
+	} else {
+		r.stage = StageUpdateService
+		d.print(r, Info, "Updating service")
+		if err := d.updateService(ctx, r, *tdNew.TaskDefinitionArn); err != nil {
+			return err
+		}
+		r.newTaskDefinition = tdNew
+		d.print(r, Success, "Successfully changed task definition to: %v:%v", *tdNew.Family, *tdNew.Revision)
 
-	r.stage = StageWaitForDeploy
-	d.print(r, Info, "Waiting for new task definition to be applied")
-	if err := d.waitForFinish(ctx, r); err != nil {
-		return err
+		r.stage = StageWaitForDeploy
+		d.print(r, Info, "Waiting for new task definition to be applied")
+		if err := d.waitForFinish(ctx, r); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -260,6 +311,43 @@ func (d *Deployer) getService(ctx context.Context, clusterName, serviceName stri
 		return nil, errors.New("service not found")
 	}
 	return result.Services[0], nil
+}
+
+func (d *Deployer) getScheduledTask(ctx context.Context, r *Request) (*ScheduledTask, error) {
+	if r.currentScheduledTask != nil {
+		return r.currentScheduledTask, nil
+	}
+
+	ruleName := r.Service
+	targetID := r.ScheduleTargetID
+	if targetID == "" {
+		targetID = ruleName
+	}
+	rule, err := d.cw.DescribeRuleWithContext(ctx, &cloudwatchevents.DescribeRuleInput{
+		Name: &ruleName,
+	})
+	if err != nil {
+		return nil, err
+	}
+	// TODO: paginate?
+	targets, err := d.cw.ListTargetsByRuleWithContext(ctx, &cloudwatchevents.ListTargetsByRuleInput{
+		Rule: rule.Name,
+	})
+	if err != nil {
+		return nil, err
+	}
+	for _, target := range targets.Targets {
+		if *target.Id == targetID {
+			r.currentScheduledTask = &ScheduledTask{
+				rule:   rule,
+				target: target,
+			}
+		}
+	}
+	if r.currentScheduledTask != nil {
+		return r.currentScheduledTask, nil
+	}
+	return nil, fmt.Errorf("no existing cloudwatch event target for %q", ruleName)
 }
 
 func (d *Deployer) getTaskDefinition(ctx context.Context, taskDef string) (*ecs.TaskDefinition, error) {
@@ -420,6 +508,52 @@ func (d *Deployer) detectFailures(ctx context.Context, r *Request, detectStart t
 			errs = append(errs, fmt.Sprintf("  %s exited %v: %s", *container.Name, aws.Int64Value(container.ExitCode), aws.StringValue(container.Reason)))
 		}
 		return errors.New(strings.Join(errs, "\n"))
+	}
+	return nil
+}
+
+func (d *Deployer) updateScheduledTaskTarget(ctx context.Context, r *Request, newTaskDefinition string) error {
+	scheduledTask, err := d.getScheduledTask(ctx, r)
+	if err != nil {
+		return err
+	}
+	taskCount := r.DesiredCount
+	if taskCount == -1 {
+		taskCount = *scheduledTask.target.EcsParameters.TaskCount
+	}
+	_, err = d.cw.PutTargets(&cloudwatchevents.PutTargetsInput{
+		Rule: &r.Service,
+		Targets: []*cloudwatchevents.Target{{
+			Id:  scheduledTask.target.Id,
+			Arn: scheduledTask.target.Arn,
+			EcsParameters: &cloudwatchevents.EcsParameters{
+				LaunchType:        aws.String(cloudwatchevents.LaunchTypeEc2),
+				TaskDefinitionArn: &newTaskDefinition,
+				TaskCount:         aws.Int64(taskCount),
+			},
+			RoleArn: scheduledTask.target.RoleArn,
+		}},
+	})
+	if err != nil {
+		return fmt.Errorf("error updating target %q: %v", *scheduledTask.target.Id, err)
+	}
+	return nil
+}
+
+func (d *Deployer) updateScheduleExpression(ctx context.Context, r *Request) error {
+	scheduledTask, err := d.getScheduledTask(ctx, r)
+	if err != nil {
+		return err
+	}
+	rule := scheduledTask.rule
+	_, err = d.cw.PutRule(&cloudwatchevents.PutRuleInput{
+		Name:               rule.Name,
+		Description:        rule.Description,
+		RoleArn:            rule.RoleArn,
+		ScheduleExpression: &r.ScheduleExpression,
+	})
+	if err != nil {
+		return fmt.Errorf("error updating scheduled expression to %q: %v", r.ScheduleExpression, err)
 	}
 	return nil
 }

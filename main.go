@@ -2,14 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"time"
 
-	"errors"
-
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/cloudwatchevents"
 	"github.com/aws/aws-sdk-go/service/ecs"
 	"github.com/fatih/color"
 	"github.com/mightyguava/ecsdeploy/deployer"
@@ -18,21 +18,24 @@ import (
 )
 
 type CLI struct {
-	Cluster          string
-	Service          string
-	Timeout          time.Duration
-	ReportAddr       string
-	ReportAuthToken  string
-	TaskDefinition   string
-	SlackToken       string
-	SlackChannel     string
-	DesiredCount     int64
-	MinPercent       int64
-	MaxPercent       int64
-	Tags             []string
-	DetectFailures   bool
-	GrafanaURL       string
-	GrafanaAuthToken string
+	Cluster            string
+	Service            string
+	ScheduleTargetID   string
+	ScheduleExpression string
+	Timeout            time.Duration
+	ReportAddr         string
+	ReportAuthToken    string
+	TaskDefinition     string
+	SlackToken         string
+	SlackChannel       string
+	DesiredCount       int64
+	MinPercent         int64
+	MaxPercent         int64
+	Tags               []string
+	DetectFailures     bool
+	GrafanaURL         string
+	GrafanaAuthToken   string
+	IsScheduledTask    bool
 }
 
 func main() {
@@ -45,7 +48,10 @@ func main() {
 func run() error {
 	cli := &CLI{}
 	kingpin.Arg("cluster", "Cluster to deploy to").Required().StringVar(&cli.Cluster)
-	kingpin.Arg("service", "Name of service to deploy").Required().StringVar(&cli.Service)
+	kingpin.Arg("service", "Name of service to deploy. If --schedule is set, this is the CloudWatch Schedule Rule Name.").Required().StringVar(&cli.Service)
+	kingpin.Flag("scheduled", "Set to true to deploy as an ECS scheduled task instead of a service").BoolVar(&cli.IsScheduledTask)
+	kingpin.Flag("schedule", "Schedule expression for ECS scheduled task. See https://docs.aws.amazon.com/AmazonCloudWatch/latest/events/ScheduledEvents.html for syntax").StringVar(&cli.ScheduleExpression)
+	kingpin.Flag("schedule-target-id", "Target ID for the ECS scheduled task. If not set, defaults to the value of \"--service\"").StringVar(&cli.ScheduleTargetID)
 	kingpin.Flag("timeout", "How long to wait for the deploy to complete").Default("10m").DurationVar(&cli.Timeout)
 	kingpin.Flag("report-addr", "URL address to report deploy status changes to").StringVar(&cli.ReportAddr)
 	kingpin.Flag("report-auth-token", "Auth token to use for reporting deploy status via HTTP. Appears on the HTTP request as an \"Authorization: Bearer <...>\" header").StringVar(&cli.ReportAuthToken)
@@ -75,6 +81,7 @@ func run() error {
 		return err
 	}
 	ecsz := ecs.New(sess)
+	cw := cloudwatchevents.New(sess)
 	var rep deployer.Reporter = &reporter.TerminalReporter{}
 	if cli.ReportAddr != "" {
 		hr, err := reporter.NewHTTPReporter(cli.ReportAddr, cli.ReportAuthToken)
@@ -89,15 +96,18 @@ func run() error {
 	if cli.GrafanaURL != "" {
 		rep = reporter.CompositeReporter{rep, reporter.NewGrafanaReporter(cli.GrafanaURL, cli.GrafanaAuthToken)}
 	}
-	d := deployer.NewDeployer(ecsz, rep)
+	d := deployer.NewDeployer(ecsz, cw, rep)
 	req := &deployer.Request{
-		Cluster:        cli.Cluster,
-		Service:        cli.Service,
-		Tags:           cli.Tags,
-		DesiredCount:   cli.DesiredCount,
-		MaxPercent:     cli.MaxPercent,
-		MinPercent:     cli.MinPercent,
-		DetectFailures: cli.DetectFailures,
+		Cluster:            cli.Cluster,
+		Service:            cli.Service,
+		ScheduleExpression: cli.ScheduleExpression,
+		ScheduleTargetID:   cli.ScheduleTargetID,
+		IsScheduledTask:    cli.IsScheduledTask,
+		Tags:               cli.Tags,
+		DesiredCount:       cli.DesiredCount,
+		MaxPercent:         cli.MaxPercent,
+		MinPercent:         cli.MinPercent,
+		DetectFailures:     cli.DetectFailures,
 	}
 	if cli.TaskDefinition != "" {
 		if cli.TaskDefinition == "-" {
