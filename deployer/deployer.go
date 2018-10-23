@@ -15,6 +15,8 @@ import (
 	"github.com/aws/aws-sdk-go/service/ecs"
 )
 
+const DefaultPollInterval = 5 * time.Second
+
 type DeployStatus struct {
 	Stage          Stage    `json:"stage,omitempty"`
 	Message        *Message `json:"message,omitempty"`
@@ -69,6 +71,8 @@ type Deployer struct {
 	ecsz     *ecs.ECS
 	reporter Reporter
 	cw       *cloudwatchevents.CloudWatchEvents
+	// How frequently to poll for deploy status.
+	PollInterval time.Duration
 }
 
 type Request struct {
@@ -97,9 +101,10 @@ type ScheduledTask struct {
 
 func NewDeployer(svc *ecs.ECS, cw *cloudwatchevents.CloudWatchEvents, reporter Reporter) *Deployer {
 	return &Deployer{
-		ecsz:     svc,
-		cw:       cw,
-		reporter: reporter,
+		ecsz:         svc,
+		cw:           cw,
+		reporter:     reporter,
+		PollInterval: DefaultPollInterval,
 	}
 }
 
@@ -449,8 +454,8 @@ func (d *Deployer) waitForFinish(ctx context.Context, r *Request) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		default:
-			time.Sleep(1 * time.Second)
+		case <-time.After(d.PollInterval):
+			// continue
 		}
 	}
 	return nil
