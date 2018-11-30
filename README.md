@@ -1,5 +1,7 @@
 # ecsdeploy
 
+**Ownership of this project has been transferred to https://github.com/button/ecsdeploy**
+
 There are already a few deploy tools for ECS out there, but none offer deploy progress reporting for
 chatops or dashboards. `ecsdeploy` is built as an easily deployable binary that can be fit into any
 deployment pipeline, but can also be used a library to embed directly into your team's deploy tool.
